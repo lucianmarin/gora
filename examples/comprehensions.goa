@@ -1,0 +1,17 @@
+# List, Set, and Dict comprehensions, membership checks, and enumerate in Goa
+import fmt
+
+def main():
+    # 1. List comprehension -> []int
+    squares: list[int] = [i * i for i in range(1, 7) if i % 2 == 0]
+    fmt.Println("Squares:", squares)
+
+    # 2. Set comprehension -> map[int]bool
+    uniq: set[int] = {x % 5 for x in range(10)}
+    if 3 in uniq and 9 not in uniq:
+        fmt.Println("Set contains 3 and not 9, size:", len(uniq))
+
+    # 3. Dict comprehension -> map[int]int
+    doubled: dict[int, int] = {x: x * 2 for x in squares}
+    for idx, val in enumerate(squares):
+        fmt.Println(f"  [{idx}] {val} -> {doubled[val]}")

@@ -1,0 +1,15 @@
+# Built binaries
+/goa
+/hello
+/shapes
+/comprehensions
+/errors_and_concurrency
+/tabs
+
+# Go build artifacts
+*.out
+*.exe
+*.test
+
+# OS / Editor files
+.DS_Store

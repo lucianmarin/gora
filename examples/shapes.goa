@@ -1,0 +1,41 @@
+# Structs, interfaces, methods, pointers, and match/case in Goa
+import:
+    fmt
+    math
+
+const:
+    KIND_CIRCLE = 0
+    KIND_RECT = 1
+
+struct Vec2:
+    x: f64
+    y: f64
+
+interface Shape:
+    area() -> f64
+
+struct Circle:
+    origin: Vec2
+    radius: f64
+
+def (c: addr[Circle]) area() -> f64:
+    return math.Pi * c.radius * c.radius
+
+def (c: addr[Circle]) translate(dx: f64, dy: f64):
+    c.origin.x += dx
+    c.origin.y += dy
+
+def describe(kind: i32) -> str:
+    match kind:
+        case KIND_CIRCLE:
+            return "circle"
+        case KIND_RECT:
+            return "rectangle"
+        default:
+            return "unknown"
+
+def main():
+    c := Circle{origin: Vec2{x: 0.0, y: 0.0}, radius: 2.5}
+    c.translate(1.0, 2.0)
+    var s: Shape = c.addr
+    fmt.Println(f"{describe(KIND_CIRCLE)} at ({c.origin.x:.1f}, {c.origin.y:.1f}) area={s.area():.4f}")

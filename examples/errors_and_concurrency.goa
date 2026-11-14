@@ -1,0 +1,42 @@
+# Error propagation (try), tuple returns, lambdas, ternaries, channels, and select in Goa
+import:
+    errors
+    fmt
+    strconv
+
+def parsePositive(raw: str) -> i32, error:
+    # Go equivalent:
+    # n, err := strconv.Atoi(raw)
+    # if err != nil {
+    #     return 0, err
+    # }
+    n := try strconv.Atoi(raw)
+    if n < 0:
+        return 0, errors.New("negative number")
+    return i32(n), nil
+
+def apply(x: i32, f: fn(i32) -> i32) -> i32:
+    return f(x)
+
+def compute(raw: str) -> i32, error:
+    n := try parsePositive(raw)
+    scaled := apply(n, lambda v: i32 -> i32: v * 10)
+    label: str = "big" if scaled >= 50 else "small"
+    fmt.Println(f"Parsed {n} -> scaled={scaled} ({label})")
+    return scaled, nil
+
+def main():
+    ch := make(chan[str], 2)
+    go def():
+        ch.put("worker-done")
+
+    msg := ""
+    select:
+        case m := ch.get():
+            msg = m
+
+    res, err := compute("7")
+    if err != nil:
+        fmt.Println("Error:", err)
+        return
+    fmt.Println(f"Result={res}, channel={msg}")

@@ -1,0 +1,17 @@
+# Minimal introduction to Goa types, f-strings, functions, and loops
+import fmt
+
+const MAX_GREETINGS = 3
+
+def greet(name: str, count: int) -> int:
+    if name == "" or count <= 0:
+        return 0
+    steps: list[int] = [i + 1 for i in range(MAX_GREETINGS)]
+    for i in range(count):
+        fmt.Println(f"[{steps[i]}] Hello from Goa, {name}!")
+    return count
+
+def main():
+    sent := greet("World", MAX_GREETINGS)
+    if sent > 0 and not (sent > 10):
+        fmt.Println(f"Successfully sent {sent} greetings.")
