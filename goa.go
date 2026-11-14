@@ -757,13 +757,18 @@ func translateFuncParamsGoaToGo(params string) string {
 type translateCtx struct {
 	usedFmt      bool
 	usedInHelper bool
+	usedMath     bool
+	usedIfHelper bool
+	usedFloorDiv bool
+	usedPow      bool
 }
 
 func translateFString(lit string, ctx *translateCtx) (string, bool) {
-	// lit starts with `"` and ends with `"`
-	if len(lit) < 2 || lit[0] != '"' || lit[len(lit)-1] != '"' {
+	// lit starts with `"` or `'` and ends with matching quote
+	if len(lit) < 2 || (lit[0] != '"' && lit[0] != '\'') || lit[len(lit)-1] != lit[0] {
 		return lit, false
 	}
+	quote := lit[0]
 	inner := lit[1 : len(lit)-1]
 	var fmtStr strings.Builder
 	var args []string
@@ -776,6 +781,11 @@ func translateFString(lit string, ctx *translateCtx) (string, bool) {
 			fmtStr.WriteByte(c)
 			fmtStr.WriteByte(inner[i+1])
 			i += 2
+			continue
+		}
+		if quote == '\'' && c == '"' {
+			fmtStr.WriteString(`\"`)
+			i++
 			continue
 		}
 		if c == '%' {
@@ -1079,21 +1089,136 @@ func hasTopLevelAssignmentOrSep(s string) bool {
 	return false
 }
 
+func trySplitChainedComparisonsGoa(s string) (operands []string, ops []string, ok bool) {
+	depth := 0
+	var quote byte
+	last := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if quote != 0 {
+			if quote != '`' && c == '\\' && i+1 < len(s) {
+				i++
+			} else if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		if c == '"' || c == '\'' || c == '`' {
+			quote = c
+			continue
+		}
+		if c == '(' || c == '[' || c == '{' {
+			depth++
+			continue
+		}
+		if c == ')' || c == ']' || c == '}' {
+			if depth > 0 {
+				depth--
+			}
+			continue
+		}
+		if depth == 0 {
+			if (c == '<' || c == '>') && (i+1 >= len(s) || s[i+1] != c) && (i == 0 || s[i-1] != c) {
+				if c == '<' && i+1 < len(s) && s[i+1] == '-' {
+					continue
+				}
+				if c == '>' && i > 0 && (s[i-1] == '-' || s[i-1] == '=') {
+					continue
+				}
+				op := string(c)
+				if i+1 < len(s) && s[i+1] == '=' {
+					op += "="
+				}
+				operands = append(operands, strings.TrimSpace(s[last:i]))
+				ops = append(ops, op)
+				i += len(op) - 1
+				last = i + 1
+			} else if (c == '=' || c == '!') && i+1 < len(s) && s[i+1] == '=' {
+				op := s[i : i+2]
+				operands = append(operands, strings.TrimSpace(s[last:i]))
+				ops = append(ops, op)
+				i++
+				last = i + 1
+			}
+		}
+	}
+	if len(ops) < 2 {
+		return nil, nil, false
+	}
+	operands = append(operands, strings.TrimSpace(s[last:]))
+	for _, o := range operands {
+		if o == "" {
+			return nil, nil, false
+		}
+	}
+	return operands, ops, true
+}
+
+func hasComparisonOpGoa(s string) bool {
+	depth := 0
+	var quote byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if quote != 0 {
+			if quote != '`' && c == '\\' && i+1 < len(s) {
+				i++
+			} else if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		if c == '"' || c == '\'' || c == '`' {
+			quote = c
+			continue
+		}
+		if c == '(' || c == '[' || c == '{' {
+			depth++
+		} else if c == ')' || c == ']' || c == '}' {
+			if depth > 0 {
+				depth--
+			}
+		} else if depth == 0 {
+			if c == '<' || c == '>' {
+				if c == '<' && i+1 < len(s) && s[i+1] == '-' {
+					continue
+				}
+				if c == '>' && i > 0 && (s[i-1] == '-' || s[i-1] == '=') {
+					continue
+				}
+				return true
+			}
+			if (c == '=' || c == '!') && i+1 < len(s) && s[i+1] == '=' {
+				return true
+			}
+		}
+	}
+	return findTopLevelKeyword(s, "in") >= 0 || findTopLevelKeyword(s, "is") >= 0
+}
+
 // translateExprGoaToGo translates Goa tokens/expressions into Go.
 func translateExprGoaToGo(s string, ctx *translateCtx) string {
-	// Handle compound `or` / `and` and `not k in m` / `k not in m` / `k in m` in pure expressions
-	if !hasTopLevelAssignmentOrSep(s) {
-		if orIdx := findTopLevelKeyword(s, "or"); orIdx > 0 {
-			left := translateExprGoaToGo(strings.TrimSpace(s[:orIdx]), ctx)
-			right := translateExprGoaToGo(strings.TrimSpace(s[orIdx+2:]), ctx)
+	// Handle compound `or` / `and`, ternary, `in`, `is`, chained comparisons, `//`, `**` in pure expressions
+	if !hasTopLevelAssignmentOrSep(s) && findTopLevelKeyword(s, "lambda") < 0 {
+		trimmed := strings.TrimSpace(s)
+		if tExpr, condExpr, fExpr, tok := splitTernary(trimmed); tok {
+			if ctx != nil {
+				ctx.usedIfHelper = true
+			}
+			return "_goaIf(" + translateExprGoaToGo(condExpr, ctx) + ", " +
+				translateExprGoaToGo(tExpr, ctx) + ", " +
+				translateExprGoaToGo(fExpr, ctx) + ")"
+		}
+		if orIdx := findTopLevelKeyword(trimmed, "or"); orIdx > 0 {
+			left := translateExprGoaToGo(strings.TrimSpace(trimmed[:orIdx]), ctx)
+			right := translateExprGoaToGo(strings.TrimSpace(trimmed[orIdx+2:]), ctx)
 			return left + " || " + right
 		}
-		if andIdx := findTopLevelKeyword(s, "and"); andIdx > 0 {
-			left := translateExprGoaToGo(strings.TrimSpace(s[:andIdx]), ctx)
-			right := translateExprGoaToGo(strings.TrimSpace(s[andIdx+3:]), ctx)
+		if andIdx := findTopLevelKeyword(trimmed, "and"); andIdx > 0 {
+			left := translateExprGoaToGo(strings.TrimSpace(trimmed[:andIdx]), ctx)
+			right := translateExprGoaToGo(strings.TrimSpace(trimmed[andIdx+3:]), ctx)
 			return left + " && " + right
 		}
-		if afterNot, ok := startsWithKW(strings.TrimSpace(s), "not"); ok {
+		if afterNot, ok := startsWithKW(trimmed, "not"); ok && afterNot != "" {
 			if inIdx := findTopLevelKeyword(afterNot, "in"); inIdx > 0 {
 				key := translateExprGoaToGo(strings.TrimSpace(afterNot[:inIdx]), ctx)
 				mExpr := translateExprGoaToGo(strings.TrimSpace(afterNot[inIdx+2:]), ctx)
@@ -1102,11 +1227,14 @@ func translateExprGoaToGo(s string, ctx *translateCtx) string {
 				}
 				return "!_goaIn(" + mExpr + ", " + key + ")"
 			}
+			if hasComparisonOpGoa(afterNot) {
+				return "!(" + translateExprGoaToGo(strings.TrimSpace(afterNot), ctx) + ")"
+			}
 		}
-		if notIdx := findTopLevelKeyword(s, "not"); notIdx > 0 {
-			afterNot := strings.TrimSpace(s[notIdx+3:])
+		if notIdx := findTopLevelKeyword(trimmed, "not"); notIdx > 0 {
+			afterNot := strings.TrimSpace(trimmed[notIdx+3:])
 			if inAfter, ok := startsWithKW(afterNot, "in"); ok && inAfter != "" {
-				key := translateExprGoaToGo(strings.TrimSpace(s[:notIdx]), ctx)
+				key := translateExprGoaToGo(strings.TrimSpace(trimmed[:notIdx]), ctx)
 				mExpr := translateExprGoaToGo(strings.TrimSpace(inAfter), ctx)
 				if ctx != nil {
 					ctx.usedInHelper = true
@@ -1114,13 +1242,44 @@ func translateExprGoaToGo(s string, ctx *translateCtx) string {
 				return "!_goaIn(" + mExpr + ", " + key + ")"
 			}
 		}
-		if inIdx := findTopLevelKeyword(s, "in"); inIdx > 0 {
-			key := translateExprGoaToGo(strings.TrimSpace(s[:inIdx]), ctx)
-			mExpr := translateExprGoaToGo(strings.TrimSpace(s[inIdx+2:]), ctx)
+		if inIdx := findTopLevelKeyword(trimmed, "in"); inIdx > 0 {
+			key := translateExprGoaToGo(strings.TrimSpace(trimmed[:inIdx]), ctx)
+			mExpr := translateExprGoaToGo(strings.TrimSpace(trimmed[inIdx+2:]), ctx)
 			if ctx != nil {
 				ctx.usedInHelper = true
 			}
 			return "_goaIn(" + mExpr + ", " + key + ")"
+		}
+		if isIdx := findTopLevelKeyword(trimmed, "is"); isIdx > 0 {
+			left := translateExprGoaToGo(strings.TrimSpace(trimmed[:isIdx]), ctx)
+			rhs := strings.TrimSpace(trimmed[isIdx+2:])
+			if afterNot, ok := startsWithKW(rhs, "not"); ok && afterNot != "" {
+				return left + " != " + translateExprGoaToGo(strings.TrimSpace(afterNot), ctx)
+			}
+			return left + " == " + translateExprGoaToGo(rhs, ctx)
+		}
+		if ops, cmpOps, ok := trySplitChainedComparisonsGoa(trimmed); ok {
+			var parts []string
+			for k, op := range cmpOps {
+				parts = append(parts, "("+translateExprGoaToGo(ops[k], ctx)+" "+op+" "+translateExprGoaToGo(ops[k+1], ctx)+")")
+			}
+			return strings.Join(parts, " && ")
+		}
+		if fIdx := findTopLevelStr(trimmed, "//"); fIdx > 0 {
+			if ctx != nil {
+				ctx.usedFloorDiv = true
+				ctx.usedMath = true
+			}
+			return "_goaFloorDiv(" + translateExprGoaToGo(strings.TrimSpace(trimmed[:fIdx]), ctx) + ", " +
+				translateExprGoaToGo(strings.TrimSpace(trimmed[fIdx+2:]), ctx) + ")"
+		}
+		if pIdx := findTopLevelStr(trimmed, "**"); pIdx > 0 {
+			if ctx != nil {
+				ctx.usedPow = true
+				ctx.usedMath = true
+			}
+			return "_goaPow(" + translateExprGoaToGo(strings.TrimSpace(trimmed[:pIdx]), ctx) + ", " +
+				translateExprGoaToGo(strings.TrimSpace(trimmed[pIdx+2:]), ctx) + ")"
 		}
 	}
 
@@ -1131,13 +1290,14 @@ func translateExprGoaToGo(s string, ctx *translateCtx) string {
 	for i < n {
 		c := s[i]
 
-		// F-string: f"..."
-		if c == 'f' && i+1 < n && s[i+1] == '"' && (i == 0 || !isIdentCont(s[i-1])) {
+		// F-string: f"..." or f'...'
+		if c == 'f' && i+1 < n && (s[i+1] == '"' || s[i+1] == '\'') && (i == 0 || !isIdentCont(s[i-1])) {
+			q := s[i+1]
 			j := i + 2
 			for j < n {
 				if s[j] == '\\' && j+1 < n {
 					j += 2
-				} else if s[j] == '"' {
+				} else if s[j] == q {
 					j++
 					break
 				} else {
@@ -1324,6 +1484,59 @@ func translateExprGoaToGo(s string, ctx *translateCtx) string {
 				}
 			}
 
+			// `print(...)` -> `fmt.Println(...)`
+			if !isMember && word == "print" && i < n && s[i] == '(' {
+				closeP := findMatchingDelim(s, i, '(', ')')
+				if closeP > i {
+					if ctx != nil {
+						ctx.usedFmt = true
+					}
+					args := splitTopLevel(s[i+1:closeP], ',')
+					for ai, a := range args {
+						if a != "" {
+							args[ai] = translateExprGoaToGo(a, ctx)
+						}
+					}
+					out.WriteString("fmt.Println(")
+					if !(len(args) == 1 && args[0] == "") {
+						out.WriteString(strings.Join(args, ", "))
+					}
+					out.WriteByte(')')
+					i = closeP + 1
+					continue
+				}
+			}
+
+			// `isinstance(x, T)` -> `func() bool { _, _ok := any(x).(T); return _ok }()`
+			if !isMember && word == "isinstance" && i < n && s[i] == '(' {
+				closeP := findMatchingDelim(s, i, '(', ')')
+				if closeP > i {
+					args := splitTopLevel(s[i+1:closeP], ',')
+					if len(args) == 2 {
+						valExpr := translateExprGoaToGo(args[0], ctx)
+						goType := translateTypeGoaToGo(args[1])
+						out.WriteString("func() bool { _, _ok := any(" + valExpr + ").(" + goType + "); return _ok }()")
+						i = closeP + 1
+						continue
+					}
+				}
+			}
+
+			// Negative integer literal index `xs[-1]` -> `xs[len(xs)-1]`
+			if !isMember && i < n && s[i] == '[' {
+				closeB := findMatchingDelim(s, i, '[', ']')
+				if closeB > i+2 && s[i+1] == '-' && isAllDigits(s[i+2:closeB]) {
+					out.WriteString(word)
+					out.WriteString("[len(")
+					out.WriteString(word)
+					out.WriteString(")-")
+					out.WriteString(s[i+2 : closeB])
+					out.WriteByte(']')
+					i = closeB + 1
+					continue
+				}
+			}
+
 			// Keywords and literals
 			if !isMember {
 				switch word {
@@ -1355,21 +1568,29 @@ func translateExprGoaToGo(s string, ctx *translateCtx) string {
 			continue
 		}
 
-		// Handle parenthesized subexpressions or argument lists containing `in` / `not in`
+		// Handle parenthesized subexpressions or argument lists containing `in` / `is` / `if` / `//` / `**` / chained comparisons
 		if c == '(' {
 			closeP := findMatchingDelim(s, i, '(', ')')
 			if closeP > i {
 				inner := s[i+1 : closeP]
 				if findTopLevelKeyword(inner, "lambda") < 0 {
 					args := splitTopLevel(inner, ',')
-					hasInArg := false
+					needsRecurse := false
 					for _, a := range args {
-						if findTopLevelKeyword(a, "in") > 0 {
-							hasInArg = true
+						if findTopLevelKeyword(a, "in") > 0 ||
+							findTopLevelKeyword(a, "is") > 0 ||
+							findTopLevelKeyword(a, "if") > 0 ||
+							findTopLevelStr(a, "//") > 0 ||
+							findTopLevelStr(a, "**") > 0 {
+							needsRecurse = true
+							break
+						}
+						if _, _, isChained := trySplitChainedComparisonsGoa(a); isChained {
+							needsRecurse = true
 							break
 						}
 					}
-					if hasInArg {
+					if needsRecurse {
 						for ai, a := range args {
 							args[ai] = translateExprGoaToGo(a, ctx)
 						}
@@ -1748,6 +1969,63 @@ func translateIfCondition(cond string, ctx *translateCtx) string {
 	return translateExprGoaToGo(cond, ctx)
 }
 
+func translateForHeaderLines(expr string, ctx *translateCtx) (headerLine string, bodyPrep string) {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return "for {", ""
+	}
+	// Classic 3-clause Go `for` (contains `;`)
+	if findTopLevelSep(expr, ';') >= 0 {
+		parts := splitTopLevel(expr, ';')
+		if len(parts) == 3 {
+			initS := translateExprGoaToGo(parts[0], ctx)
+			condS := translateExprGoaToGo(parts[1], ctx)
+			stepS := translateExprGoaToGo(parts[2], ctx)
+			return "for " + initS + "; " + condS + "; " + stepS + " {", ""
+		}
+		return "for " + translateExprGoaToGo(expr, ctx) + " {", ""
+	}
+
+	inIdx := findTopLevelKeyword(expr, "in")
+	if inIdx > 0 {
+		lhs := strings.TrimSpace(expr[:inIdx])
+		rhs := strings.TrimSpace(expr[inIdx+2:])
+
+		var varName string
+		if colon := findTopLevelSep(lhs, ':'); colon >= 0 {
+			varName = strings.TrimSpace(lhs[:colon])
+		} else {
+			varName = lhs
+		}
+
+		// `zip(a, b)`
+		if strings.HasPrefix(rhs, "zip(") && findMatchingDelim(rhs, 3, '(', ')') == len(rhs)-1 {
+			zargs := splitTopLevel(rhs[4:len(rhs)-1], ',')
+			vparts := splitTopLevel(strings.Trim(varName, "()"), ',')
+			if len(zargs) == 2 && len(vparts) == 2 {
+				aExpr := translateExprGoaToGo(zargs[0], ctx)
+				bExpr := translateExprGoaToGo(zargs[1], ctx)
+				hdr := "for _zi := 0; _zi < len(" + aExpr + ") && _zi < len(" + bExpr + "); _zi++ {"
+				prep := vparts[0] + ", " + vparts[1] + " := " + aExpr + "[_zi], " + bExpr + "[_zi]"
+				return hdr, prep
+			}
+		}
+
+		// `reversed(xs)`
+		if strings.HasPrefix(rhs, "reversed(") && findMatchingDelim(rhs, 8, '(', ')') == len(rhs)-1 {
+			xsExpr := translateExprGoaToGo(rhs[9:len(rhs)-1], ctx)
+			hdr := "for _ri := len(" + xsExpr + ") - 1; _ri >= 0; _ri-- {"
+			prep := varName + " := " + xsExpr + "[_ri]"
+			if varName == "_" {
+				prep = ""
+			}
+			return hdr, prep
+		}
+	}
+
+	return translateForHeader(expr, ctx), ""
+}
+
 func translateForHeader(expr string, ctx *translateCtx) string {
 	expr = strings.TrimSpace(expr)
 	if expr == "" {
@@ -1849,6 +2127,11 @@ func translateForHeader(expr string, ctx *translateCtx) string {
 	return "for " + translateExprGoaToGo(expr, ctx) + " {"
 }
 
+type compClauseGoa struct {
+	forClause string
+	conds     []string
+}
+
 // tryEmitGoaComprehension expands `[expr for ...]` / `{expr for ...}` / `{k: v for ...}` into idiomatic Go loops.
 func tryEmitGoaComprehension(indent string, varName, goaType, val string, ctx *translateCtx) (lines []string, ok bool) {
 	val = strings.TrimSpace(val)
@@ -1871,24 +2154,88 @@ func tryEmitGoaComprehension(indent string, varName, goaType, val string, ctx *t
 		return nil, false
 	}
 
-	var forClause, condClause string
-	if ifIdx := findTopLevelKeyword(afterFor, "if"); ifIdx > 0 {
-		forClause = strings.TrimSpace(afterFor[:ifIdx])
-		condClause = strings.TrimSpace(afterFor[ifIdx+2:])
-		if condClause == "" {
+	// Parse one or more `var in iter [if cond...]` clauses
+	var clauses []compClauseGoa
+	rem := afterFor
+	for len(rem) > 0 {
+		inIdx := findTopLevelKeyword(rem, "in")
+		if inIdx <= 0 {
 			return nil, false
 		}
-	} else {
-		forClause = afterFor
+		lhsPart := strings.TrimSpace(rem[:inIdx])
+		afterIn := strings.TrimSpace(rem[inIdx+2:])
+		nextFor := findTopLevelKeyword(afterIn, "for")
+		var seg string
+		if nextFor >= 0 {
+			seg = strings.TrimSpace(afterIn[:nextFor])
+			rem = strings.TrimSpace(afterIn[nextFor+3:])
+		} else {
+			seg = afterIn
+			rem = ""
+		}
+		var iterPart string
+		var conds []string
+		if firstIf := findTopLevelKeyword(seg, "if"); firstIf > 0 {
+			iterPart = strings.TrimSpace(seg[:firstIf])
+			condTail := strings.TrimSpace(seg[firstIf+2:])
+			if condTail == "" {
+				return nil, false
+			}
+			for len(condTail) > 0 {
+				ni := findTopLevelKeyword(condTail, "if")
+				if ni < 0 {
+					conds = append(conds, condTail)
+					break
+				}
+				c := strings.TrimSpace(condTail[:ni])
+				if c == "" {
+					return nil, false
+				}
+				conds = append(conds, c)
+				condTail = strings.TrimSpace(condTail[ni+2:])
+			}
+		} else {
+			iterPart = seg
+		}
+		if iterPart == "" {
+			return nil, false
+		}
+		clauses = append(clauses, compClauseGoa{
+			forClause: lhsPart + " in " + iterPart,
+			conds:     conds,
+		})
 	}
-
-	// Ensure `forClause` has `in`
-	if findTopLevelKeyword(forClause, "in") <= 0 {
+	if len(clauses) == 0 {
 		return nil, false
 	}
 
 	goaType = strings.TrimSpace(goaType)
 	goGoType := translateTypeGoaToGo(goaType)
+
+	emitLoopBody := func(leafLine string) []string {
+		var body []string
+		curInd := indent
+		var closers []string
+		for _, cl := range clauses {
+			hdr, prep := translateForHeaderLines(cl.forClause, ctx)
+			body = append(body, curInd+hdr)
+			closers = append(closers, curInd+"}")
+			curInd += "    "
+			if prep != "" {
+				body = append(body, curInd+prep)
+			}
+			for _, cond := range cl.conds {
+				body = append(body, curInd+"if "+translateIfCondition(cond, ctx)+" {")
+				closers = append(closers, curInd+"}")
+				curInd += "    "
+			}
+		}
+		body = append(body, curInd+leafLine)
+		for ci := len(closers) - 1; ci >= 0; ci-- {
+			body = append(body, closers[ci])
+		}
+		return body
+	}
 
 	if isBracket {
 		if !strings.HasPrefix(goGoType, "[]") {
@@ -1896,15 +2243,7 @@ func tryEmitGoaComprehension(indent string, varName, goaType, val string, ctx *t
 		}
 		elemExpr := translateExprGoaToGo(head, ctx)
 		lines = append(lines, indent+"var "+varName+" "+goGoType)
-		lines = append(lines, indent+translateForHeader(forClause, ctx))
-		if condClause != "" {
-			lines = append(lines, indent+"    if "+translateIfCondition(condClause, ctx)+" {")
-			lines = append(lines, indent+"        "+varName+" = append("+varName+", "+elemExpr+")")
-			lines = append(lines, indent+"    }")
-		} else {
-			lines = append(lines, indent+"    "+varName+" = append("+varName+", "+elemExpr+")")
-		}
-		lines = append(lines, indent+"}")
+		lines = append(lines, emitLoopBody(varName+" = append("+varName+", "+elemExpr+")")...)
 		return lines, true
 	}
 
@@ -1917,30 +2256,14 @@ func tryEmitGoaComprehension(indent string, varName, goaType, val string, ctx *t
 		keyExpr := translateExprGoaToGo(head[:colonIdx], ctx)
 		valExpr := translateExprGoaToGo(head[colonIdx+1:], ctx)
 		lines = append(lines, indent+varName+" := make("+goGoType+")")
-		lines = append(lines, indent+translateForHeader(forClause, ctx))
-		if condClause != "" {
-			lines = append(lines, indent+"    if "+translateIfCondition(condClause, ctx)+" {")
-			lines = append(lines, indent+"        "+varName+"["+keyExpr+"] = "+valExpr)
-			lines = append(lines, indent+"    }")
-		} else {
-			lines = append(lines, indent+"    "+varName+"["+keyExpr+"] = "+valExpr)
-		}
-		lines = append(lines, indent+"}")
+		lines = append(lines, emitLoopBody(varName+"["+keyExpr+"] = "+valExpr)...)
 		return lines, true
 	}
 
 	// Set comprehension
 	elemExpr := translateExprGoaToGo(head, ctx)
 	lines = append(lines, indent+varName+" := make("+goGoType+")")
-	lines = append(lines, indent+translateForHeader(forClause, ctx))
-	if condClause != "" {
-		lines = append(lines, indent+"    if "+translateIfCondition(condClause, ctx)+" {")
-		lines = append(lines, indent+"        "+varName+"["+elemExpr+"] = true")
-		lines = append(lines, indent+"    }")
-	} else {
-		lines = append(lines, indent+"    "+varName+"["+elemExpr+"] = true")
-	}
-	lines = append(lines, indent+"}")
+	lines = append(lines, emitLoopBody(varName+"["+elemExpr+"] = true")...)
 	return lines, true
 }
 
@@ -1998,13 +2321,12 @@ func activeFuncFrame(stack []blockFrame) *blockFrame {
 	return nil
 }
 
-func GoaToGo(src string) (string, error) {
-	// Reject UTF-8 BOM
-	if strings.HasPrefix(src, "\xEF\xBB\xBF") {
-		return "", &GoaError{Message: "UTF-8 BOM is not allowed", Line: 1, Col: 1}
-	}
+type goaLogicalLine struct {
+	lineNo int
+	raw    string
+}
 
-	// Split universal newlines (\r\n, \r, \n)
+func preprocessLogicalLinesGoa(src string) ([]goaLogicalLine, error) {
 	var rawLines []string
 	p := 0
 	for p <= len(src) {
@@ -2025,6 +2347,243 @@ func GoaToGo(src string) (string, error) {
 		}
 	}
 
+	var result []goaLogicalLine
+	curLineNo := 0
+	var acc strings.Builder
+	parenDepth := 0
+	continued := false
+	tripleQuote := ""
+	tripleF := false
+	var tripleBody strings.Builder
+
+	updateDepth := func(code string) {
+		var q byte
+		for i := 0; i < len(code); i++ {
+			c := code[i]
+			if q != 0 {
+				if q != '`' && c == '\\' && i+1 < len(code) {
+					i++
+				} else if c == q {
+					q = 0
+				}
+				continue
+			}
+			if c == '"' || c == '\'' || c == '`' {
+				q = c
+				continue
+			}
+			if c == '(' || c == '[' || c == '{' {
+				parenDepth++
+			} else if c == ')' || c == ']' || c == '}' {
+				if parenDepth > 0 {
+					parenDepth--
+				}
+			}
+		}
+	}
+
+	escapeSingleLineStr := func(body string, isF bool) string {
+		var b strings.Builder
+		if isF {
+			b.WriteString(`f"`)
+		} else {
+			b.WriteByte('"')
+		}
+		for i := 0; i < len(body); i++ {
+			c := body[i]
+			if c == '\n' {
+				b.WriteString(`\n`)
+			} else if c == '"' {
+				b.WriteString(`\"`)
+			} else {
+				b.WriteByte(c)
+			}
+		}
+		b.WriteByte('"')
+		return b.String()
+	}
+
+	findTripleStart := func(s string) (idx int, delim string, isF bool, ok bool) {
+		var q byte
+		for i := 0; i < len(s); i++ {
+			c := s[i]
+			if q != 0 {
+				if q != '`' && c == '\\' && i+1 < len(s) {
+					i++
+				} else if c == q {
+					q = 0
+				}
+				continue
+			}
+			if c == '#' && (i == 0 || s[i-1] == ' ' || s[i-1] == '\t') {
+				break
+			}
+			if strings.HasPrefix(s[i:], `f"""`) && (i == 0 || !isIdentCont(s[i-1])) {
+				return i, `"""`, true, true
+			}
+			if strings.HasPrefix(s[i:], `f'''`) && (i == 0 || !isIdentCont(s[i-1])) {
+				return i, `'''`, true, true
+			}
+			if strings.HasPrefix(s[i:], `"""`) {
+				return i, `"""`, false, true
+			}
+			if strings.HasPrefix(s[i:], `'''`) {
+				return i, `'''`, false, true
+			}
+			if c == '"' || c == '\'' || c == '`' {
+				q = c
+			}
+		}
+		return 0, "", false, false
+	}
+
+	collapseSameLineTriple := func(s string) string {
+		cur := s
+		for {
+			idx, delim, isF, ok := findTripleStart(cur)
+			if !ok {
+				break
+			}
+			startOff := idx + 3
+			if isF {
+				startOff = idx + 4
+			}
+			closeRel := strings.Index(cur[startOff:], delim)
+			if closeRel < 0 {
+				break
+			}
+			closeIdx := startOff + closeRel
+			lit := escapeSingleLineStr(cur[startOff:closeIdx], isF)
+			cur = cur[:idx] + lit + cur[closeIdx+3:]
+		}
+		return cur
+	}
+
+	for idx, raw := range rawLines {
+		lineNo := idx + 1
+		if tripleQuote != "" {
+			if closeRel := strings.Index(raw, tripleQuote); closeRel >= 0 {
+				tripleBody.WriteByte('\n')
+				tripleBody.WriteString(raw[:closeRel])
+				rest := raw[closeRel+3:]
+				acc.WriteString(escapeSingleLineStr(tripleBody.String(), tripleF))
+				acc.WriteString(collapseSameLineTriple(rest))
+				tripleQuote = ""
+				tripleBody.Reset()
+				accStr := acc.String()
+				code, _, _ := splitInlineHashComment(strings.TrimLeft(accStr, " \t"))
+				parenDepth = 0
+				updateDepth(code)
+				continued = strings.HasSuffix(accStr, `\`)
+				if continued {
+					acc.Reset()
+					acc.WriteString(strings.TrimRight(accStr[:len(accStr)-1], " \t") + " ")
+				} else if parenDepth == 0 {
+					result = append(result, goaLogicalLine{lineNo: curLineNo, raw: accStr})
+					acc.Reset()
+				}
+			} else {
+				tripleBody.WriteByte('\n')
+				tripleBody.WriteString(raw)
+			}
+			continue
+		}
+
+		if parenDepth == 0 && !continued {
+			if strings.TrimSpace(raw) == "" {
+				result = append(result, goaLogicalLine{lineNo: lineNo, raw: raw})
+				continue
+			}
+			if strings.HasSuffix(raw, " ") || strings.HasSuffix(raw, "\t") {
+				return nil, &GoaError{Message: "trailing whitespace is not allowed", Line: lineNo, Col: len(raw)}
+			}
+			curLineNo = lineNo
+		}
+
+		line := collapseSameLineTriple(raw)
+		if tIdx, delim, isF, ok := findTripleStart(line); ok {
+			startOff := tIdx + 3
+			if isF {
+				startOff = tIdx + 4
+			}
+			prefix := line[:tIdx]
+			if acc.Len() > 0 {
+				acc.WriteByte(' ')
+				acc.WriteString(strings.TrimLeft(prefix, " \t"))
+			} else {
+				acc.WriteString(prefix)
+			}
+			tripleQuote = delim
+			tripleF = isF
+			tripleBody.WriteString(line[startOff:])
+			continue
+		}
+
+		if parenDepth > 0 || continued {
+			chunk := strings.TrimSpace(line)
+			code, _, _ := splitInlineHashComment(chunk)
+			if strings.HasSuffix(code, `\`) {
+				acc.WriteByte(' ')
+				acc.WriteString(strings.TrimRight(code[:len(code)-1], " \t"))
+				continued = true
+				continue
+			}
+			continued = false
+			accStr := acc.String()
+			if strings.HasSuffix(accStr, "(") || strings.HasSuffix(accStr, "[") || strings.HasSuffix(accStr, "{") {
+				acc.WriteString(code)
+			} else if code != "" {
+				acc.WriteByte(' ')
+				acc.WriteString(code)
+			}
+			parenDepth = 0
+			accStr = acc.String()
+			cCode, _, _ := splitInlineHashComment(strings.TrimLeft(accStr, " \t"))
+			updateDepth(cCode)
+			if parenDepth == 0 {
+				result = append(result, goaLogicalLine{lineNo: curLineNo, raw: accStr})
+				acc.Reset()
+			}
+			continue
+		}
+
+		trimmedStart := strings.TrimLeft(line, " \t")
+		code, _, hasComment := splitInlineHashComment(trimmedStart)
+		if !hasComment && strings.HasSuffix(line, `\`) {
+			acc.WriteString(strings.TrimRight(line[:len(line)-1], " \t"))
+			continued = true
+			continue
+		}
+		updateDepth(code)
+		if parenDepth > 0 {
+			wsLen := len(line) - len(trimmedStart)
+			acc.WriteString(line[:wsLen])
+			acc.WriteString(code)
+		} else {
+			result = append(result, goaLogicalLine{lineNo: lineNo, raw: line})
+		}
+	}
+
+	if tripleQuote != "" {
+		return nil, &GoaError{Message: "unterminated triple-quoted string", Line: curLineNo, Col: 1}
+	}
+	if acc.Len() > 0 {
+		result = append(result, goaLogicalLine{lineNo: curLineNo, raw: acc.String()})
+	}
+	return result, nil
+}
+
+func GoaToGo(src string) (string, error) {
+	// Reject UTF-8 BOM
+	if strings.HasPrefix(src, "\xEF\xBB\xBF") {
+		return "", &GoaError{Message: "UTF-8 BOM is not allowed", Line: 1, Col: 1}
+	}
+
+	logicalLines, err := preprocessLogicalLinesGoa(src)
+	if err != nil {
+		return "", err
+	}
+
 	var indentChar byte
 	indentWidth := 0
 	var stack []blockFrame
@@ -2034,6 +2593,7 @@ func GoaToGo(src string) (string, error) {
 
 	hasPackage := false
 	hasFmtImport := false
+	hasMathImport := false
 	packageLineIdx := -1
 	var lines []string
 	pendingBlanks := 0
@@ -2064,8 +2624,9 @@ func GoaToGo(src string) (string, error) {
 		}
 	}
 
-	for idx, raw := range rawLines {
-		lineNo := idx + 1
+	for _, ll := range logicalLines {
+		lineNo := ll.lineNo
+		raw := ll.raw
 		ws := 0
 		hasSpace := false
 		hasTab := false
@@ -2195,6 +2756,9 @@ func GoaToGo(src string) (string, error) {
 				if pkgPath == `"fmt"` && alias == "" {
 					hasFmtImport = true
 				}
+				if pkgPath == `"math"` && alias == "" {
+					hasMathImport = true
+				}
 				if alias != "" {
 					lines = append(lines, "import "+alias+" "+pkgPath+commentSuffix)
 				} else {
@@ -2207,8 +2771,16 @@ func GoaToGo(src string) (string, error) {
 					pkg := strings.TrimSpace(fromRest[:impIdx])
 					what := strings.TrimSpace(fromRest[impIdx+6:])
 					pkgPath := quoteImportPath(pkg)
+					if pkgPath == `"fmt"` {
+						hasFmtImport = true
+					}
+					if pkgPath == `"math"` {
+						hasMathImport = true
+					}
 					if what == "*" {
 						lines = append(lines, "import . "+pkgPath+commentSuffix)
+					} else if strings.Contains(what, ",") {
+						lines = append(lines, "import "+pkgPath+commentSuffix)
 					} else {
 						lines = append(lines, "import "+what+" "+pkgPath+commentSuffix)
 					}
@@ -2222,6 +2794,9 @@ func GoaToGo(src string) (string, error) {
 			pkgPath, alias := formatGoImportSpec(code)
 			if pkgPath == `"fmt"` && alias == "" {
 				hasFmtImport = true
+			}
+			if pkgPath == `"math"` && alias == "" {
+				hasMathImport = true
 			}
 			if alias != "" {
 				lines = append(lines, makeIndent(level)+alias+" "+pkgPath+commentSuffix)
@@ -2273,7 +2848,22 @@ func GoaToGo(src string) (string, error) {
 				}
 				stack = append(stack, blockFrame{level: level, kind: blockNormal})
 			} else if after, ok := startsWithKW(h, "for"); ok {
-				lines = append(lines, ind+translateForHeader(after, ctx)+commentSuffix)
+				hdr, prep := translateForHeaderLines(after, ctx)
+				lines = append(lines, ind+hdr+commentSuffix)
+				if prep != "" {
+					lines = append(lines, ind+"    "+prep)
+				}
+				stack = append(stack, blockFrame{level: level, kind: blockNormal})
+			} else if after, ok := startsWithKW(h, "with"); ok {
+				lines = append(lines, ind+"{"+commentSuffix)
+				if asIdx := findTopLevelKeyword(after, "as"); asIdx > 0 {
+					exprS := translateExprGoaToGo(strings.TrimSpace(after[:asIdx]), ctx)
+					vname := strings.TrimSpace(after[asIdx+2:])
+					lines = append(lines, ind+"    "+vname+" := "+exprS)
+					lines = append(lines, ind+"    defer "+vname+".Close()")
+				} else {
+					lines = append(lines, ind+"    "+translateExprGoaToGo(after, ctx))
+				}
 				stack = append(stack, blockFrame{level: level, kind: blockNormal})
 			} else if h == "match" || h == "switch" {
 				lines = append(lines, ind+"switch {"+commentSuffix)
@@ -2517,7 +3107,28 @@ func GoaToGo(src string) (string, error) {
 			continue
 		}
 
-		// `return a if cond else b`
+		// `raise expr` -> `panic(expr)`
+		if afterRaise, ok := startsWithKW(code, "raise"); ok {
+			if strings.TrimSpace(afterRaise) == "" {
+				lines = append(lines, ind+`panic("error")`+commentSuffix)
+			} else {
+				lines = append(lines, ind+"panic("+translateExprGoaToGo(strings.TrimSpace(afterRaise), ctx)+")"+commentSuffix)
+			}
+			continue
+		}
+
+		// `del m[k]` -> `delete(m, k)`
+		if afterDel, ok := startsWithKW(code, "del"); ok && afterDel != "" {
+			d := strings.TrimSpace(afterDel)
+			if ob := findLastTopLevelOpenBracket(d); ob > 0 && strings.HasSuffix(d, "]") {
+				mExpr := translateExprGoaToGo(strings.TrimSpace(d[:ob]), ctx)
+				kExpr := translateExprGoaToGo(strings.TrimSpace(d[ob+1:len(d)-1]), ctx)
+				lines = append(lines, ind+"delete("+mExpr+", "+kExpr+")"+commentSuffix)
+				continue
+			}
+		}
+
+		// `return a if cond else b` or `return [comp]`
 		if afterRet, ok := startsWithKW(code, "return"); ok {
 			if tExpr, condExpr, fExpr, tok := splitTernary(afterRet); tok {
 				lines = append(lines, ind+"if "+translateIfCondition(condExpr, ctx)+" {"+commentSuffix)
@@ -2527,6 +3138,24 @@ func GoaToGo(src string) (string, error) {
 				lines = append(lines, ind+"}")
 				continue
 			}
+			if isComprehensionLiteral(afterRet) {
+				if fn := activeFuncFrame(stack); fn != nil && len(fn.retTypes) == 1 {
+					if compLines, cok := tryEmitGoaComprehension(ind, "_comp", fn.retTypes[0], afterRet, ctx); cok {
+						if hasInline {
+							compLines[0] += commentSuffix
+						}
+						lines = append(lines, compLines...)
+						lines = append(lines, ind+"return _comp")
+						continue
+					}
+				}
+			}
+			if strings.TrimSpace(afterRet) == "" {
+				lines = append(lines, ind+"return"+commentSuffix)
+			} else {
+				lines = append(lines, ind+"return "+translateExprGoaToGo(afterRet, ctx)+commentSuffix)
+			}
+			continue
 		}
 
 		// Typed variable declaration: `[var] name: type [= val]`
@@ -2591,8 +3220,11 @@ func GoaToGo(src string) (string, error) {
 				fn.errDeclared = true
 				continue
 			}
-			if _, _, _, ok := splitTernary(rhs); ok {
-				return "", &GoaError{Message: "ternary assignment with ':=' requires an explicit type (use 'x: T = a if cond else b')", Line: lineNo, Col: 1}
+			if tExpr, condExpr, fExpr, tok := splitTernary(rhs); tok {
+				ctx.usedIfHelper = true
+				lines = append(lines, ind+lhs+" := _goaIf("+translateExprGoaToGo(condExpr, ctx)+", "+
+					translateExprGoaToGo(tExpr, ctx)+", "+translateExprGoaToGo(fExpr, ctx)+")"+commentSuffix)
+				continue
 			}
 			if isComprehensionLiteral(rhs) {
 				return "", &GoaError{Message: "comprehension requires an explicit container type (e.g. 'xs: list[i32] = [...]')", Line: lineNo, Col: 1}
@@ -2656,7 +3288,15 @@ func GoaToGo(src string) (string, error) {
 	}
 	flushBlanks()
 
-	// Synthesize `package main` if omitted, and `import "fmt"` if `f"..."` was used without importing fmt.
+	// Synthesize `package main` if omitted, and `import "fmt"` / `import "math"` if needed.
+	var autoImports []string
+	if ctx.usedFmt && !hasFmtImport {
+		autoImports = append(autoImports, `import "fmt"`)
+	}
+	if ctx.usedMath && !hasMathImport {
+		autoImports = append(autoImports, `import "math"`)
+	}
+
 	var finalLines []string
 	if !hasPackage {
 		insertAt := 0
@@ -2665,16 +3305,18 @@ func GoaToGo(src string) (string, error) {
 		}
 		finalLines = append(finalLines, lines[:insertAt]...)
 		finalLines = append(finalLines, "package main")
-		if ctx.usedFmt && !hasFmtImport {
-			finalLines = append(finalLines, "", `import "fmt"`)
+		if len(autoImports) > 0 {
+			finalLines = append(finalLines, "")
+			finalLines = append(finalLines, autoImports...)
 		}
 		if insertAt < len(lines) && lines[insertAt] != "" {
 			finalLines = append(finalLines, "")
 		}
 		finalLines = append(finalLines, lines[insertAt:]...)
-	} else if ctx.usedFmt && !hasFmtImport && packageLineIdx >= 0 {
+	} else if len(autoImports) > 0 && packageLineIdx >= 0 {
 		finalLines = append(finalLines, lines[:packageLineIdx+1]...)
-		finalLines = append(finalLines, "", `import "fmt"`)
+		finalLines = append(finalLines, "")
+		finalLines = append(finalLines, autoImports...)
 		finalLines = append(finalLines, lines[packageLineIdx+1:]...)
 	} else {
 		finalLines = lines
@@ -2682,6 +3324,18 @@ func GoaToGo(src string) (string, error) {
 
 	if ctx.usedInHelper {
 		finalLines = append(finalLines, "", "func _goaIn[K comparable, V any](m map[K]V, k K) bool { _, ok := m[k]; return ok }")
+	}
+	if ctx.usedIfHelper {
+		finalLines = append(finalLines, "", "func _goaIf[T any](cond bool, a, b T) T { if cond { return a }; return b }")
+	}
+	if ctx.usedFloorDiv || ctx.usedPow {
+		finalLines = append(finalLines, "", "type _goaNum interface { ~int | ~int8 | ~int16 | ~int32 | ~int64 | ~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64 | ~float32 | ~float64 }")
+	}
+	if ctx.usedFloorDiv {
+		finalLines = append(finalLines, "", "func _goaFloorDiv[T _goaNum](a, b T) T { return T(math.Floor(float64(a) / float64(b))) }")
+	}
+	if ctx.usedPow {
+		finalLines = append(finalLines, "", "func _goaPow[T _goaNum](a, b T) T { return T(math.Pow(float64(a), float64(b))) }")
 	}
 
 	out := strings.Join(finalLines, "\n")
@@ -3295,6 +3949,39 @@ func translateExprGoToGoa(s string) string {
 				}
 			}
 		}
+		if i+7 <= n && s[i:i+7] == "_goaIf(" && (i == 0 || !isIdentCont(s[i-1])) {
+			cp := findMatchingDelim(s, i+6, '(', ')')
+			if cp > i+6 {
+				args := splitTopLevel(s[i+7:cp], ',')
+				if len(args) == 3 {
+					out.WriteString(translateExprGoToGoa(args[1]) + " if " + translateExprGoToGoa(args[0]) + " else " + translateExprGoToGoa(args[2]))
+					i = cp + 1
+					continue
+				}
+			}
+		}
+		if i+13 <= n && s[i:i+13] == "_goaFloorDiv(" && (i == 0 || !isIdentCont(s[i-1])) {
+			cp := findMatchingDelim(s, i+12, '(', ')')
+			if cp > i+12 {
+				args := splitTopLevel(s[i+13:cp], ',')
+				if len(args) == 2 {
+					out.WriteString(translateExprGoToGoa(args[0]) + " // " + translateExprGoToGoa(args[1]))
+					i = cp + 1
+					continue
+				}
+			}
+		}
+		if i+8 <= n && s[i:i+8] == "_goaPow(" && (i == 0 || !isIdentCont(s[i-1])) {
+			cp := findMatchingDelim(s, i+7, '(', ')')
+			if cp > i+7 {
+				args := splitTopLevel(s[i+8:cp], ',')
+				if len(args) == 2 {
+					out.WriteString(translateExprGoToGoa(args[0]) + " ** " + translateExprGoToGoa(args[1]))
+					i = cp + 1
+					continue
+				}
+			}
+		}
 
 		if c == '!' && (i+1 >= n || s[i+1] != '=') {
 			out.WriteString("not ")
@@ -3541,7 +4228,17 @@ func GoToGoaIndent(src, indentUnit string) (string, error) {
 
 		// Package declaration: omit `package main` (implicit in Goa); preserve other packages
 		if len(stack) == 0 {
-			if strings.HasPrefix(code, "func _goaIn[") {
+			if strings.HasPrefix(code, "func _goaIn[") ||
+				strings.HasPrefix(code, "func _goaIf[") ||
+				strings.HasPrefix(code, "type _goaNum ") ||
+				strings.HasPrefix(code, "func _goaFloorDiv[") ||
+				strings.HasPrefix(code, "func _goaPow[") {
+				bDepth := strings.Count(code, "{") - strings.Count(code, "}")
+				for bDepth > 0 && idx+1 < len(rawLines) {
+					idx++
+					l := strings.TrimSpace(rawLines[idx])
+					bDepth += strings.Count(l, "{") - strings.Count(l, "}")
+				}
 				skipNextBlank = true
 				continue
 			}

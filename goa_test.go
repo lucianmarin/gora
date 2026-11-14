@@ -181,3 +181,48 @@ func TestRangeBlankAndMultiVarStructRoundTrip(t *testing.T) {
 	}
 }
 
+func TestExtendedPythonicFeatures(t *testing.T) {
+	src := `def build(n: isize) -> list[isize]:
+    return [
+        x + y
+        for x in range(n)
+        for y in range(2)
+        if x + y > 0
+    ]
+
+def main():
+    doc := """hello
+world"""
+    nums := build(3)
+    tag := "big" if nums[-1] > 2 else "small"
+    var p: addr[isize] = nil
+    ok := 0 < nums[0] < 10 and not 1 == 2 and p is nil
+    fval := -7 // 2
+    pval := 2 ** 3
+    m := dict[str, isize]{"a": 1, "b": 2}
+    del m["a"]
+    total := 0
+    for a, b in zip(nums, nums):
+        total += a + b
+    for r in reversed(nums):
+        total += r
+    if ok and isinstance(any("hi"), str):
+        print(f'doc={len(doc)} tag={tag} f={fval} p={pval} total={total} m={len(m)}')
+`
+	goCode, err := GoaToGo(src)
+	if err != nil {
+		t.Fatalf("GoaToGo failed: %v", err)
+	}
+	fset := token.NewFileSet()
+	if _, err := parser.ParseFile(fset, "py.go", goCode, parser.AllErrors); err != nil {
+		t.Fatalf("invalid Go output: %v\n%s", err, goCode)
+	}
+	if _, err := format.Source([]byte(goCode)); err != nil {
+		t.Fatalf("gofmt failed: %v\n%s", err, goCode)
+	}
+	if !strings.Contains(goCode, `import "fmt"`) || !strings.Contains(goCode, `import "math"`) {
+		t.Fatalf("expected auto fmt and math imports, got:\n%s", goCode)
+	}
+}
+
+
