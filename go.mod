@@ -1,3 +1,3 @@
-module github.com/lucianmarin/goa
+module github.com/lucianmarin/gora
 
 go 1.22

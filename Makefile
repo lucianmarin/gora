@@ -2,7 +2,7 @@ GO ?= go
 PREFIX ?= $(shell brew --prefix 2>/dev/null || echo /usr/local)
 BINDIR ?= $(DESTDIR)$(PREFIX)/bin
 
-TARGET = goa
+TARGET = gora
 
 .PHONY: all test bench install uninstall clean
 

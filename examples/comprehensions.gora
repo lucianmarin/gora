@@ -1,4 +1,4 @@
-# List, Set, and Dict comprehensions, membership checks, and enumerate in Goa
+# List, Set, and Dict comprehensions, membership checks, and enumerate in Gora
 import fmt
 
 def main():

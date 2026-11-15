@@ -1,4 +1,4 @@
-# Structs, interfaces, methods, pointers, and match/case in Goa
+# Structs, interfaces, methods, pointers, and match/case in Gora
 import:
     fmt
     math

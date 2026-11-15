@@ -1,4 +1,4 @@
-# Minimal introduction to Goa types, f-strings, functions, and loops
+# Minimal introduction to Gora types, f-strings, functions, and loops
 import fmt
 
 const MAX_GREETINGS = 3
@@ -8,7 +8,7 @@ def greet(name: str, count: int) -> int:
         return 0
     steps: list[int] = [i + 1 for i in range(MAX_GREETINGS)]
     for i in range(count):
-        fmt.Println(f"[{steps[i]}] Hello from Goa, {name}!")
+        fmt.Println(f"[{steps[i]}] Hello from Gora, {name}!")
     return count
 
 def main():

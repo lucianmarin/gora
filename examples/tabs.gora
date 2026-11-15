@@ -1,4 +1,4 @@
-# Tab-indented Fibonacci calculator in Goa
+# Tab-indented Fibonacci calculator in Gora
 import fmt
 
 def fib(n: int) -> int:

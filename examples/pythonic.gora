@@ -1,8 +1,8 @@
-# Pythonic ergonomics in Goa: lambda, enumerate(), zip(), reversed(), f-strings,
+# Pythonic ergonomics in Gora: lambda, enumerate(), zip(), reversed(), f-strings,
 # ternary, membership (`in` / `not in`), `//`, `**`, chained comparisons, and multi-line syntax
 
 def main():
-    banner := """=== Pythonic Goa ===
+    banner := """=== Pythonic Gora ===
 lambda, enumerate, zip, reversed"""
 
     # Multi-line nested comprehension

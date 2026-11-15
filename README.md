@@ -1,10 +1,10 @@
-# Goa — Pythonic Go Bidirectional Transpiler
+# Gora — Pythonic Go Bidirectional Transpiler
 
-**Goa** is a human-readable, zero-overhead **1-to-1 syntactic representation of Go** inspired by Python's clean naming, indentation, type annotations, and ergonomics—built on the same design principles as [Pura](../pura).
+**Gora** is a human-readable, zero-overhead **1-to-1 syntactic representation of Go** inspired by Python's clean naming, indentation, type annotations, and ergonomics—built on the same design principles as [Pura](../pura).
 
-Every Goa construct maps directly and deterministically to idiomatic Go—with **no curly braces (`{` `}`) for blocks**, **Pythonic `def` functions and postfix `: type` declarations**, **optional `package main`**, **concise types (`i8`..`i64`, `u8`..`u64`, `f32`, `f64`, `str`, `list[T]`, `dict[K, V]`, `set[T]`, `chan[T]`, `addr[T]`)**, **Pythonic `try` error propagation**, **`f"..."` strings**, **comprehensions**, **`in` / `not in` map checks**, **inline `lambda`**, **`match`/`select`**, and **full bidirectional `--from-go` conversion**.
+Every Gora construct maps directly and deterministically to idiomatic Go—with **no curly braces (`{` `}`) for blocks**, **Pythonic `def` functions and postfix `: type` declarations**, **optional `package main`**, **concise types (`i8`..`i64`, `u8`..`u64`, `f32`, `f64`, `str`, `list[T]`, `dict[K, V]`, `set[T]`, `chan[T]`, `addr[T]`)**, **Pythonic `try` error propagation**, **`f"..."` strings**, **comprehensions**, **`in` / `not in` map checks**, **inline `lambda`**, **`match`/`select`**, and **full bidirectional `--from-go` conversion**.
 
-- **Extension:** `.goa`
+- **Extension:** `.gora`
 - **Target Language:** Go 1.22+
 - **Encoding:** UTF-8 (without BOM)
 
@@ -12,7 +12,7 @@ Every Goa construct maps directly and deterministically to idiomatic Go—with *
 
 ## Side-by-Side Comparison
 
-### Goa (`.goa`)
+### Gora (`.gora`)
 
 ```python
 import:
@@ -68,7 +68,7 @@ func main() {
     for _, x := range nums {
         seen[x] = true
     }
-    if _goaIn(seen, 9) && !_goaIn(seen, 4) {
+    if _goraIn(seen, 9) && !_goraIn(seen, 4) {
         v, err := parsePositive("7")
         if err == nil {
             var tag string
@@ -85,9 +85,9 @@ func main() {
 
 ---
 
-## Goa Syntax Features
+## Gora Syntax Features
 
-| Category | Goa (`.goa`) | Go (`.go`) |
+| Category | Gora (`.gora`) | Go (`.go`) |
 | :--- | :--- | :--- |
 | **Package** | _(omitted)_ or `package util` | `package main` or `package util` |
 | **Imports** | `import fmt`, `import net/http as h`, `import:`, `from p import *` | `import "fmt"`, `import h "net/http"`, `import (...)`, `import . "p"` |
@@ -108,30 +108,30 @@ func main() {
 ## Build & CLI Usage
 
 ```sh
-# Build the goa binary
+# Build the gora binary
 make
 
 # Install to Homebrew prefix (or /usr/local/bin)
 make install
 
-# Transpile a .goa file to Go on stdout
-./goa examples/hello.goa
+# Transpile a .gora file to Go on stdout
+./gora examples/hello.gora
 
 # Transpile and run immediately via go run
-./goa --run examples/hello.goa
+./gora --run examples/hello.gora
 
-# Compile a .goa file to a native binary
-./goa --compile examples/shapes.goa -o shapes && ./shapes
+# Compile a .gora file to a native binary
+./gora --compile examples/shapes.gora -o shapes && ./shapes
 
-# Format/canonicalize Goa (default 4 spaces, or N spaces / tab)
-./goa --goa examples/hello.goa
-./goa --goa --indent tab examples/hello.goa
+# Format/canonicalize Gora (default 4 spaces, or N spaces / tab)
+./gora --gora examples/hello.gora
+./gora --gora --indent tab examples/hello.gora
 
-# Convert existing Go source code into Goa
-./goa --from-go input.go
+# Convert existing Go source code into Gora
+./gora --from-go input.go
 
-# Validate Goa syntax & Go AST
-./goa --check examples/hello.goa
+# Validate Gora syntax & Go AST
+./gora --check examples/hello.gora
 
 # Run tests & throughput benchmark
 make test && make bench
@@ -139,8 +139,8 @@ make test && make bench
 
 ### Examples
 
-- [`examples/hello.goa`](examples/hello.goa) — Basics, `f"..."` strings, list comprehension, and `range()`
-- [`examples/shapes.goa`](examples/shapes.goa) — `struct`, `interface`, pointer receiver methods, `match`/`case`
-- [`examples/comprehensions.goa`](examples/comprehensions.goa) — List, set, and dict comprehensions, `in`/`not in`, `enumerate()`
-- [`examples/errors_and_concurrency.goa`](examples/errors_and_concurrency.goa) — `try` propagation, multi-return without parens, `lambda`, ternary, `chan[T]`, `go def():`, `select`
-- [`examples/tabs.goa`](examples/tabs.goa) — Tab-indented Fibonacci calculator (`for _ in range(2, n + 1):`)
+- [`examples/hello.gora`](examples/hello.gora) — Basics, `f"..."` strings, list comprehension, and `range()`
+- [`examples/shapes.gora`](examples/shapes.gora) — `struct`, `interface`, pointer receiver methods, `match`/`case`
+- [`examples/comprehensions.gora`](examples/comprehensions.gora) — List, set, and dict comprehensions, `in`/`not in`, `enumerate()`
+- [`examples/errors_and_concurrency.gora`](examples/errors_and_concurrency.gora) — `try` propagation, multi-return without parens, `lambda`, ternary, `chan[T]`, `go def():`, `select`
+- [`examples/tabs.gora`](examples/tabs.gora) — Tab-indented Fibonacci calculator (`for _ in range(2, n + 1):`)

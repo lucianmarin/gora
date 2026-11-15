@@ -1,4 +1,4 @@
-# Error propagation (try), tuple returns, lambdas, ternaries, channels, and select in Goa
+# Error propagation (try), tuple returns, lambdas, ternaries, channels, and select in Gora
 import:
     errors
     fmt
